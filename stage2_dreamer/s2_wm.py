@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from stage2_dreamer.rssm import RSSM, kl_loss
+from stage2_dreamer.rssm import KL_BALANCE_ALPHA, RSSM, kl_loss
 
 
 def symlog(x):
@@ -103,10 +103,9 @@ class WorldModel(nn.Module):
                         - symlog(batch["reward"])) ** 2).mean()
         cont_loss = F.binary_cross_entropy_with_logits(
             self.cont_head(feat), batch["cont"])
-        if kl_alpha is None:
-            kl, kl_value = kl_loss(post_l, prior_l)
-        else:
-            kl, kl_value = kl_loss(post_l, prior_l, alpha=kl_alpha)
+        kl, kl_value = kl_loss(
+            post_l, prior_l,
+            alpha=KL_BALANCE_ALPHA if kl_alpha is None else kl_alpha)
 
         total = recon_loss + reward_loss + cont_loss + kl
         metrics = {

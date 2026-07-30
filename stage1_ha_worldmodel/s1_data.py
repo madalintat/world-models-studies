@@ -12,6 +12,7 @@ from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
+import torch
 from PIL import Image
 
 ZOOM_SKIP = 30  # CarRacing spends the first frames zooming in; skip them.
@@ -70,3 +71,8 @@ def iter_episodes(data: dict):
     for n in data["ep_lens"]:
         yield data["frames"][start:start + n], data["actions"][start:start + n]
         start += n
+
+
+def frames_to_tensor(frames_u8: np.ndarray) -> torch.Tensor:
+    """(N, 64, 64, 3) uint8 -> (N, 3, 64, 64) float in [0, 1]."""
+    return torch.from_numpy(frames_u8).float().permute(0, 3, 1, 2) / 255.0

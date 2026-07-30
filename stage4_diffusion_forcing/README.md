@@ -45,7 +45,8 @@ recollect.
 
 ## Full run on one RTX 5090
 
-Drop `--smoke` to get the full config (documented defaults in `train.py`):
+Drop `--smoke` and pass `--device cuda` to get the full config (documented
+defaults in `train.py`):
 100k frames at seed 0, AE batch 256 for 30k steps (about 45 minutes), then
 the dynamics model (d_model 512, depth 12, 8 heads, sequences of 32 frames,
 batch 32) for 250k steps with v_space weighting recommended. Expect 8 to 11

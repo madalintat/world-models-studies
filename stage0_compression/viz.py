@@ -19,12 +19,12 @@ import torch
 from stage0_compression.models import ConvAE, ConvVAE
 
 
-def _to_tensor(frames_u8):
+def to_tensor(frames_u8):
     """(N, 64, 64, 3) uint8 -> (N, 3, 64, 64) float in [0, 1]."""
     return torch.from_numpy(frames_u8).float().permute(0, 3, 1, 2) / 255.0
 
 
-def _to_uint8(x):
+def to_uint8(x):
     """(N, 3, 64, 64) float -> (N, 64, 64, 3) uint8."""
     x = (x.detach().clamp(0, 1) * 255.0).round()
     return x.permute(0, 2, 3, 1).to(torch.uint8).numpy()
@@ -42,10 +42,10 @@ def encode_deterministic(model, x):
 @torch.no_grad()
 def recon_grid(model, frames_u8):
     """Originals on the top row, reconstructions on the bottom row."""
-    x = _to_tensor(frames_u8)
+    x = to_tensor(frames_u8)
     x_hat = model.decode(encode_deterministic(model, x))
     top = np.concatenate(list(frames_u8), axis=1)
-    bottom = np.concatenate(list(_to_uint8(x_hat)), axis=1)
+    bottom = np.concatenate(list(to_uint8(x_hat)), axis=1)
     return np.concatenate([top, bottom], axis=0)
 
 
@@ -53,12 +53,12 @@ def recon_grid(model, frames_u8):
 def latent_traversal(model, frame_u8, dims, span=3.0, steps=7):
     """One row per dim: decode z with that dim swept from -span to +span.
     Returns (len(dims)*64, steps*64, 3) uint8."""
-    z0 = encode_deterministic(model, _to_tensor(frame_u8[None]))
+    z0 = encode_deterministic(model, to_tensor(frame_u8[None]))
     rows = []
     for d in dims:
         codes = z0.repeat(steps, 1)
         codes[:, d] = torch.linspace(-span, span, steps)
-        imgs = _to_uint8(model.decode(codes))
+        imgs = to_uint8(model.decode(codes))
         rows.append(np.concatenate(list(imgs), axis=1))
     return np.concatenate(rows, axis=0)
 
@@ -67,10 +67,10 @@ def latent_traversal(model, frame_u8, dims, span=3.0, steps=7):
 def interpolation_strip(model, frame_a_u8, frame_b_u8, steps=8):
     """Decode evenly spaced points on the line between two codes.
     Returns (64, steps*64, 3) uint8."""
-    za = encode_deterministic(model, _to_tensor(frame_a_u8[None]))
-    zb = encode_deterministic(model, _to_tensor(frame_b_u8[None]))
+    za = encode_deterministic(model, to_tensor(frame_a_u8[None]))
+    zb = encode_deterministic(model, to_tensor(frame_b_u8[None]))
     t = torch.linspace(0, 1, steps).unsqueeze(1)
-    imgs = _to_uint8(model.decode(za * (1 - t) + zb * t))
+    imgs = to_uint8(model.decode(za * (1 - t) + zb * t))
     return np.concatenate(list(imgs), axis=1)
 
 

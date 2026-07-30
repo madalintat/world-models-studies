@@ -59,9 +59,8 @@ def collect_frames(episodes, frames_per_episode, seed=0, frame_skip=4, skip_star
     return resize_frames(np.stack(all_frames))
 
 
-def default_path(seed, smoke=False):
-    tag = "smoke_" if smoke else ""
-    return DATA_DIR / f"{tag}frames_seed{seed}.npz"
+def default_path(seed, episodes, frames_per_episode):
+    return DATA_DIR / f"frames_e{episodes}_f{frames_per_episode}_seed{seed}.npz"
 
 
 def ensure_dataset(path, episodes, frames_per_episode, seed=0, frame_skip=4):
@@ -83,7 +82,8 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=str, default=None)
     args = p.parse_args()
-    out = Path(args.out) if args.out else default_path(args.seed)
+    out = (Path(args.out) if args.out
+           else default_path(args.seed, args.episodes, args.frames_per_episode))
     frames = ensure_dataset(
         out, args.episodes, args.frames_per_episode, seed=args.seed, frame_skip=args.frame_skip
     )

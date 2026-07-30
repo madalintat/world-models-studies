@@ -14,6 +14,8 @@ import imageio.v2 as imageio
 import numpy as np
 import torch
 
+from stage3_token_transformer.s3_data import frames_to_tensor, to_uint8_frames
+
 
 def psnr(a: np.ndarray, b: np.ndarray) -> float:
     """PSNR between two uint8 images. Capped at 99 dB for identical inputs."""
@@ -47,7 +49,7 @@ def rollout(vqvae, gpt, context_frames, actions, n_future: int, temperature: flo
     K = gpt.cfg.tokens_per_frame
     device = next(gpt.parameters()).device
 
-    ctx = torch.from_numpy(context_frames).float().permute(0, 3, 1, 2).to(device) / 255.0
+    ctx = frames_to_tensor(context_frames).to(device)
     ctx_tokens = vqvae.encode_to_indices(ctx)
     acts = torch.from_numpy(np.asarray(actions, dtype=np.float32)).to(device)
 
@@ -70,8 +72,7 @@ def rollout(vqvae, gpt, context_frames, actions, n_future: int, temperature: flo
 
     gen_tokens = torch.cat(gen_tokens, dim=0)
     pixels = vqvae.decode_from_indices(gen_tokens)
-    gen_frames = (pixels.permute(0, 2, 3, 1) * 255.0).round().clamp(0, 255).to(torch.uint8)
-    return gen_frames.cpu().numpy(), gen_tokens.cpu().numpy()
+    return to_uint8_frames(pixels), gen_tokens.cpu().numpy()
 
 
 def save_drift_csv(path, psnrs: list[float]):

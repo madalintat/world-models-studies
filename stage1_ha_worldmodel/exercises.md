@@ -9,7 +9,9 @@ Run this once first so checkpoints and data exist:
 
     uv run python -m stage1_ha_worldmodel.train --smoke
 
-Checkpoints, data, and videos land in `data/stage1_ha_worldmodel/smoke/`.
+Checkpoints and videos land in `data/stage1_ha_worldmodel/smoke/`; the raw
+rollout cache sits one level up in `data/stage1_ha_worldmodel/`, shared
+between smoke and full runs.
 
 ## Prediction exercises
 
@@ -35,8 +37,9 @@ negative? Commit, then rerun and read the `[mdnrnn]` lines:
     uv run python -m stage1_ha_worldmodel.train mdnrnn --smoke
 
 Expected: it can go negative, because this is a continuous density (a
-gaussian with std 0.1 has log density about 1.4 at its mean, so per-dim NLL
-around -1). If you predicted "loss must be positive" you were thinking of
+gaussian with std 0.1 has log density about 1.4 at its mean, so around -1
+per dimension; the printed NLL sums 32 dimensions, so it can sink well
+below -20). If you predicted "loss must be positive" you were thinking of
 cross-entropy over discrete classes.
 
 ### P3: where does the dream video fall apart

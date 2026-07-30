@@ -28,7 +28,6 @@ class GPTConfig:
     n_heads: int = 4
     n_layers: int = 4
     max_frames: int = 16
-    dropout: float = 0.0
 
     @property
     def frame_block(self) -> int:
@@ -47,7 +46,6 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = cfg.d_model // cfg.n_heads
         self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model)
         self.proj = nn.Linear(cfg.d_model, cfg.d_model)
-        self.dropout = cfg.dropout
 
     def forward(self, x, past_kv=None):
         B, L, D = x.shape
@@ -65,7 +63,7 @@ class CausalSelfAttention(nn.Module):
             v = torch.cat([pv, v], dim=2)
         if past_len == 0:
             y = F.scaled_dot_product_attention(
-                q, k, v, is_causal=True, dropout_p=self.dropout if self.training else 0.0
+                q, k, v, is_causal=True
             )
         else:
             # New queries see the whole cache plus a causal pattern among themselves.
@@ -74,7 +72,7 @@ class CausalSelfAttention(nn.Module):
             j = torch.arange(total, device=x.device).unsqueeze(0)
             mask = j <= (past_len + i)
             y = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0
+                q, k, v, attn_mask=mask
             )
         y = y.transpose(1, 2).contiguous().view(B, L, D)
         return self.proj(y), (k, v)
@@ -90,7 +88,6 @@ class Block(nn.Module):
             nn.Linear(cfg.d_model, 4 * cfg.d_model),
             nn.GELU(),
             nn.Linear(4 * cfg.d_model, cfg.d_model),
-            nn.Dropout(cfg.dropout),
         )
 
     def forward(self, x, past_kv=None):
@@ -107,7 +104,6 @@ class TokenGPT(nn.Module):
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.act_emb = nn.Linear(cfg.action_dim, cfg.d_model)
         self.pos_emb = nn.Embedding(cfg.block_size, cfg.d_model)
-        self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layers))
         self.ln_f = nn.LayerNorm(cfg.d_model)
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
@@ -128,7 +124,7 @@ class TokenGPT(nn.Module):
         past_len = 0 if past_kv is None else past_kv[0][0].shape[2]
         assert past_len + L <= self.cfg.block_size, "sequence exceeds block_size"
         pos = torch.arange(past_len, past_len + L, device=x_emb.device)
-        x = self.drop(x_emb + self.pos_emb(pos))
+        x = x_emb + self.pos_emb(pos)
         new_kv = []
         for i, blk in enumerate(self.blocks):
             x, kv = blk(x, None if past_kv is None else past_kv[i])

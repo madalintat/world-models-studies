@@ -30,7 +30,7 @@ Outputs land in `data/stage3_token_transformer/runs/smoke/`: `vqvae.pt`, `gpt.pt
 
 ## Full run on one RTX 5090
 
-Defaults without `--smoke` are the full config; move the models and batches to CUDA before launching a real run (the code is written device-agnostic through `next(model.parameters()).device` in rollout, training loops build CPU tensors).
+Defaults without `--smoke` are the full config; pass `--device cuda` for a real run (the rollout follows the model device automatically).
 
 - Data: 250 episodes x 200 steps = 50k frames, collected once (~40 min, CPU-bound in Box2D).
 - `--phase vq`: base 128, batch 128, 60k steps, lr 3e-4. About 1h. Expect recon MSE below 1e-3 and codebook perplexity above 100.

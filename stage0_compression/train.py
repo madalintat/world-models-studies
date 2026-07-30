@@ -55,12 +55,9 @@ def parse_args(argv=None):
 def load_data(args):
     if args.data:
         return np.load(args.data)["frames"], args.data
-    if args.smoke:
-        path = collect.default_path(args.seed, smoke=True)
-        frames = collect.ensure_dataset(path, episodes=2, frames_per_episode=60, seed=args.seed)
-    else:
-        path = collect.default_path(args.seed)
-        frames = collect.ensure_dataset(path, episodes=40, frames_per_episode=500, seed=args.seed)
+    episodes, fpe = (2, 60) if args.smoke else (40, 500)
+    path = collect.default_path(args.seed, episodes, fpe)
+    frames = collect.ensure_dataset(path, episodes=episodes, frames_per_episode=fpe, seed=args.seed)
     return frames, str(path)
 
 
@@ -72,7 +69,6 @@ def train(args):
     torch.manual_seed(args.seed)
     frames, data_path = load_data(args)
     device = torch.device(args.device)
-    x_all = torch.from_numpy(frames).float().permute(0, 3, 1, 2).div_(255.0)
 
     model = (ConvVAE if args.model == "vae" else ConvAE)(latent_dim=args.latent_dim).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -81,8 +77,8 @@ def train(args):
     t0 = time.time()
 
     for step in range(1, args.steps + 1):
-        idx = rng.integers(0, len(x_all), size=args.batch_size)
-        x = x_all[idx].to(device)
+        idx = rng.integers(0, len(frames), size=args.batch_size)
+        x = viz.to_tensor(frames[idx]).to(device)
         if args.model == "vae":
             x_hat, mu, logvar, _ = model(x)
             loss, recon, kl = vae_loss(x, x_hat, mu, logvar, beta=args.beta)

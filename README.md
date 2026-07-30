@@ -61,7 +61,7 @@ Rules of engagement:
   The whole course is developable without a GPU.
 - One modern GPU (16GB or more, a 4090/5090 class card is comfortable):
   every full training run in stages 0-4 fits on a single card, from about
-  30 minutes (stage 0) to about a day (stage 4).
+  30 minutes (stage 0) to about 8-11 hours (stage 4).
 - A multi-GPU box, if you have access to one: stage 4/5 data-parallel runs
   and sweeps. This is where the open-dreamer blog's MFU and roofline lessons
   become real. Entirely optional.

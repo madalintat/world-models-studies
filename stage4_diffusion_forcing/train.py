@@ -87,14 +87,22 @@ FULL = dict(
 )
 
 
+def frames_to_tensor(frames_u8: np.ndarray) -> torch.Tensor:
+    """(N, 64, 64, 3) uint8 -> (N, 3, 64, 64) float in [0, 1]."""
+    return torch.from_numpy(frames_u8).float().permute(0, 3, 1, 2) / 255.0
+
+
 def resize64(obs: np.ndarray) -> np.ndarray:
     t = torch.from_numpy(obs).float().permute(2, 0, 1).unsqueeze(0) / 255.0
     t = F.interpolate(t, size=(64, 64), mode="area")
     return (t[0].permute(1, 2, 0) * 255).round().to(torch.uint8).numpy()
 
 
-def collect_data(cfg: dict, cache_name: str) -> dict:
-    cache = DATA_DIR / cache_name
+def collect_data(cfg: dict) -> dict:
+    # Cache name carries every parameter that defines the dataset, so a
+    # config change cannot silently reuse stale data.
+    cache = DATA_DIR / (f"data_e{cfg['n_episodes']}_f{cfg['frames_per_episode']}"
+                        f"_s{cfg['seed']}.npz")
     if cache.exists():
         d = np.load(cache)
         return {k: d[k] for k in d.files}
@@ -113,10 +121,12 @@ def collect_data(cfg: dict, cache_name: str) -> dict:
             steer = float(np.clip(0.9 * steer + 0.25 * rng.normal(), -1.0, 1.0))
             gas = float(0.3 + 0.3 * rng.random())
             action = np.array([steer, gas, 0.0], dtype=np.float32)
+            # Step first, then record: actions[t] is the action applied just
+            # before frames[t] was observed, the same convention as stage 3.
+            obs, _, term, trunc, _ = env.step(action)
             frames.append(resize64(obs))
             actions.append(action)
             ep_ids.append(ep)
-            obs, _, term, trunc, _ = env.step(action)
             if term or trunc:
                 break
     env.close()
@@ -130,14 +140,14 @@ def collect_data(cfg: dict, cache_name: str) -> dict:
     return data
 
 
-def train_ae(frames_u8: np.ndarray, cfg: dict, generator: torch.Generator) -> LatentAE:
-    ae = LatentAE(latent_dim=8, base=cfg["ae_base"])
+def train_ae(frames_u8: np.ndarray, cfg: dict, generator: torch.Generator,
+             device: str = "cpu") -> LatentAE:
+    ae = LatentAE(latent_dim=8, base=cfg["ae_base"]).to(device)
     opt = torch.optim.Adam(ae.parameters(), lr=cfg["lr"])
-    frames = torch.from_numpy(frames_u8).float().permute(0, 3, 1, 2) / 255.0
-    n = frames.shape[0]
+    n = frames_u8.shape[0]
     for step in range(cfg["ae_steps"]):
         idx = torch.randint(0, n, (cfg["ae_batch"],), generator=generator)
-        batch = frames[idx]
+        batch = frames_to_tensor(frames_u8[idx.numpy()]).to(device)
         recon = ae(batch)
         loss = F.mse_loss(recon, batch)
         opt.zero_grad()
@@ -151,11 +161,11 @@ def train_ae(frames_u8: np.ndarray, cfg: dict, generator: torch.Generator) -> La
 @torch.no_grad()
 def encode_all(ae: LatentAE, frames_u8: np.ndarray, batch: int = 128) -> torch.Tensor:
     ae.eval()
-    frames = torch.from_numpy(frames_u8).float().permute(0, 3, 1, 2) / 255.0
+    device = next(ae.parameters()).device
     out = []
-    for i in range(0, frames.shape[0], batch):
-        z = ae.encode(frames[i : i + batch])
-        out.append(LatentAE.to_tokens(z))
+    for i in range(0, frames_u8.shape[0], batch):
+        z = ae.encode(frames_to_tensor(frames_u8[i : i + batch]).to(device))
+        out.append(LatentAE.to_tokens(z).cpu())
     ae.train()
     return torch.cat(out)  # (N, 64, 8)
 
@@ -178,6 +188,7 @@ def train_dynamics(
     weighting: str,
     clean_context: bool,
     generator: torch.Generator,
+    device: str = "cpu",
 ) -> None:
     opt = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
     t_len = cfg["seq_len"]
@@ -185,20 +196,22 @@ def train_dynamics(
         pick = torch.randint(0, len(starts), (cfg["dyn_batch"],), generator=generator)
         s0 = torch.from_numpy(starts[pick.numpy()])
         idx = s0.unsqueeze(1) + torch.arange(t_len)
-        z = latents[idx]
-        a = actions[idx]
+        z = latents[idx].to(device)
+        a = actions[idx].to(device)
         b = z.shape[0]
         if clean_context:
             # teacher forcing baseline: context clean, only the last frame is
             # noised and supervised (this is the break-it lab, not the method)
             tau = torch.ones(b, t_len)
             tau[:, -1] = torch.rand(b, generator=generator)
-            mask = torch.zeros(b, t_len)
+            mask = torch.zeros(b, t_len).to(device)
             mask[:, -1] = 1.0
         else:
             tau = sample_frame_taus(b, t_len, generator=generator)
             mask = None
-        noise = torch.randn(z.shape, generator=generator)
+        # Sample on the CPU generator for reproducibility, then move.
+        noise = torch.randn(z.shape, generator=generator).to(device)
+        tau = tau.to(device)
         z_tau = interpolate(noise, z, tau)
         pred = model(z_tau, a, tau)
         loss = flow_matching_loss(pred, z, tau, weighting=weighting, frame_mask=mask)
@@ -226,6 +239,7 @@ def main() -> None:
     )
     p.add_argument("--k-steps", type=int, default=None, help="tau ladder steps")
     p.add_argument("--out", default=None, help="output directory")
+    p.add_argument("--device", default="cpu", help="training device, e.g. cuda")
     args = p.parse_args()
 
     cfg = dict(SMOKE if args.smoke else FULL)
@@ -248,11 +262,11 @@ def main() -> None:
     t_start = time.time()
 
     print("collecting data")
-    data = collect_data(cfg, f"data_{tag}.npz")
+    data = collect_data(cfg)
     print(f"  {data['frames'].shape[0]} frames cached under {DATA_DIR}")
 
     print("training AE")
-    ae = train_ae(data["frames"], cfg, generator)
+    ae = train_ae(data["frames"], cfg, generator, device=args.device)
 
     # guard against decoder collapse: an undertrained decoder can output the
     # dataset-mean image for every latent, and then the drift curve says
@@ -260,7 +274,7 @@ def main() -> None:
     # first")
     with torch.no_grad():
         pair = data["frames"][[0, data["frames"].shape[0] // 2]]
-        f = torch.from_numpy(pair).float().permute(0, 3, 1, 2) / 255.0
+        f = frames_to_tensor(pair).to(args.device)
         two = ae.decode(ae.encode(f))
         gap = (two[0] - two[1]).abs().mean().item()
     if gap < 1e-3:
@@ -286,10 +300,15 @@ def main() -> None:
         n_heads=cfg["n_heads"],
         depth=cfg["depth"],
         max_t=cfg["seq_len"],
-    )
+    ).to(args.device)
     train_dynamics(
-        model, latents, actions, starts, cfg, args.weighting, args.clean_context, generator
+        model, latents, actions, starts, cfg, args.weighting, args.clean_context,
+        generator, device=args.device,
     )
+    # The rollout and decode are a one-off evaluation; running them on CPU
+    # keeps the sampling generator simple (one CPU generator end to end).
+    model = model.cpu()
+    ae = ae.cpu()
 
     print(f"rollout: {cfg['k_steps']}-step ladder, tau_ctx={tau_ctx}")
     p0 = int(starts[0])
@@ -309,7 +328,7 @@ def main() -> None:
         z_grid = LatentAE.from_tokens(gen[0] * std + mean)
         pred_pixels = ae.decode(z_grid)
     gt_u8 = data["frames"][p0 + cfg["prefill"] : p0 + span]
-    gt_pixels = torch.from_numpy(gt_u8).float().permute(0, 3, 1, 2) / 255.0
+    gt_pixels = frames_to_tensor(gt_u8)
     curve = drift_curve(pred_pixels, gt_pixels)
 
     save_drift_csv(curve, str(out_dir / "drift.csv"))

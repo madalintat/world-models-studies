@@ -42,9 +42,8 @@ you need:
 CUDA_VISIBLE_DEVICES=3 UV_PROJECT_ENVIRONMENT=.venv-gpu uv run python -m stage0_compression.train --model vae --device cuda
 ```
 
-Full-run invocations differ per stage (some take `--device cuda`, some set
-the device in the config); each stage README's "Full run" section has the
-exact commands.
+Every training stage takes `--device cuda` for its full run; each stage
+README's "Full run" section has the exact commands.
 
 ## Modal
 

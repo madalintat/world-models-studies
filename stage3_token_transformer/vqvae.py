@@ -45,7 +45,7 @@ class VectorQuantizerEMA(nn.Module):
         self.register_buffer("codebook", codebook)
         self.register_buffer("ema_cluster_size", torch.ones(num_codes))
         self.register_buffer("ema_embed_sum", codebook.clone())
-        # Cumulative pick counts since the last reset_usage(), for the histogram.
+        # Cumulative pick counts, for the usage histogram.
         self.register_buffer("usage", torch.zeros(num_codes))
 
     def forward(self, z_e: torch.Tensor):
@@ -98,14 +98,11 @@ class VectorQuantizerEMA(nn.Module):
         self.ema_embed_sum[dead] = src
         self.ema_cluster_size[dead] = 1.0
 
-    def usage_histogram(self, normalize: bool = True) -> torch.Tensor:
+    def usage_histogram(self) -> torch.Tensor:
         h = self.usage.clone()
-        if normalize and h.sum() > 0:
+        if h.sum() > 0:
             h = h / h.sum()
         return h
-
-    def reset_usage(self):
-        self.usage.zero_()
 
     def active_codes(self) -> int:
         return int((self.usage > 0).sum())

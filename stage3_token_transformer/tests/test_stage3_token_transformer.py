@@ -18,7 +18,7 @@ torch.set_num_threads(4)
 
 
 def tiny_gpt(max_frames=4):
-    cfg = GPTConfig(d_model=32, n_heads=2, n_layers=2, max_frames=max_frames, dropout=0.0)
+    cfg = GPTConfig(d_model=32, n_heads=2, n_layers=2, max_frames=max_frames)
     return TokenGPT(cfg).eval()
 
 

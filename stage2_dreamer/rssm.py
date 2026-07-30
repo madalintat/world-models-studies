@@ -89,17 +89,14 @@ class RSSM(nn.Module):
         z = self.sample(post_logits)
         return h, z, prior_logits, post_logits
 
-    def observe(self, embeds, actions, state=None):
-        """Roll the posterior over a subsequence.
+    def observe(self, embeds, actions):
+        """Roll the posterior over a subsequence, starting from the zero state.
 
         embeds: (B, T, E). actions: (B, T, A), where actions[:, t] is the
         action that led into frame t (zeros at t=0 of an episode).
         """
         B, T, _ = embeds.shape
-        if state is None:
-            h, z = self.initial(B, embeds.device)
-        else:
-            h, z = state
+        h, z = self.initial(B, embeds.device)
         hs, zs, priors, posts = [], [], [], []
         for t in range(T):
             h, z, pl, ql = self.obs_step(h, z, actions[:, t], embeds[:, t])

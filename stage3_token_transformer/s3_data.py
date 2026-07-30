@@ -43,13 +43,18 @@ def collect_episodes(n_episodes: int, steps: int, seed: int = 7, skip: int = 30)
     import gymnasium as gym
 
     env = gym.make("CarRacing-v3", render_mode=None)
+
+    def reset_past_zoom(reset_seed):
+        # The first frames are a zoom-in animation, not driving; skip them.
+        obs, _ = env.reset(seed=reset_seed)
+        for _ in range(skip):
+            obs, *_ = env.step(np.array([0.0, 0.1, 0.0], dtype=np.float32))
+        return obs
+
     all_frames, all_actions = [], []
     for ep in range(n_episodes):
         rng = np.random.default_rng(seed * 1000 + ep)
-        obs, _ = env.reset(seed=seed * 1000 + ep)
-        # The first frames are a zoom-in animation, not driving; skip them.
-        for _ in range(skip):
-            obs, *_ = env.step(np.array([0.0, 0.1, 0.0], dtype=np.float32))
+        obs = reset_past_zoom(seed * 1000 + ep)
         raw = [obs]
         acts = [np.zeros(3, dtype=np.float32)]
         for t in range(steps):
@@ -58,9 +63,7 @@ def collect_episodes(n_episodes: int, steps: int, seed: int = 7, skip: int = 30)
             raw.append(obs)
             acts.append(a)
             if terminated or truncated:
-                obs, _ = env.reset(seed=seed * 1000 + ep + 500)
-                for _ in range(skip):
-                    obs, *_ = env.step(np.array([0.0, 0.1, 0.0], dtype=np.float32))
+                obs = reset_past_zoom(seed * 1000 + ep + 500)
         all_frames.append(resize_to_64(np.stack(raw)))
         all_actions.append(np.stack(acts))
     env.close()
@@ -69,3 +72,15 @@ def collect_episodes(n_episodes: int, steps: int, seed: int = 7, skip: int = 30)
     actions = np.stack(all_actions).astype(np.float32)
     np.savez_compressed(cache, frames=frames, actions=actions)
     return frames, actions
+
+
+def frames_to_tensor(frames_u8):
+    """(..., 64, 64, 3) uint8 -> (..., 3, 64, 64) float in [0, 1]."""
+    x = torch.from_numpy(np.ascontiguousarray(frames_u8)).float() / 255.0
+    return x.movedim(-1, -3)
+
+
+def to_uint8_frames(x):
+    """(..., 3, 64, 64) float -> (..., 64, 64, 3) uint8."""
+    x = (x.detach().clamp(0, 1) * 255.0).round()
+    return x.movedim(-3, -1).to(torch.uint8).cpu().numpy()

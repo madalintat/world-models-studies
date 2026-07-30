@@ -33,7 +33,7 @@ from stage3_token_transformer.rollout3 import (
     save_drift_csv,
     save_rollout_video,
 )
-from stage3_token_transformer.s3_data import collect_episodes
+from stage3_token_transformer.s3_data import collect_episodes, frames_to_tensor
 from stage3_token_transformer.s3_transformer import (
     IGNORE_INDEX,
     GPTConfig,
@@ -92,11 +92,7 @@ def out_dir_for(smoke: bool) -> Path:
     return root / ("smoke" if smoke else "full")
 
 
-def frames_to_tensor(frames_u8: np.ndarray) -> torch.Tensor:
-    return torch.from_numpy(frames_u8).float().permute(0, 3, 1, 2) / 255.0
-
-
-def train_vq(cfg, frames, out_dir, ema=True, dead_reinit=True):
+def train_vq(cfg, frames, out_dir, ema=True, dead_reinit=True, device="cpu"):
     flat = frames.reshape(-1, 64, 64, 3)
     model = VQVAE(
         num_codes=256,
@@ -105,13 +101,13 @@ def train_vq(cfg, frames, out_dir, ema=True, dead_reinit=True):
         decay=cfg["vq_decay"],
         enable_ema=ema,
         enable_dead_reinit=dead_reinit,
-    )
+    ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(cfg["seed"] + 1)
     model.train()
     for step in range(cfg["vq_steps"]):
         idx = rng.integers(0, flat.shape[0], size=cfg["vq_batch"])
-        x = frames_to_tensor(flat[idx])
+        x = frames_to_tensor(flat[idx]).to(device)
         loss, logs = model.loss(x)
         opt.zero_grad()
         loss.backward()
@@ -122,14 +118,14 @@ def train_vq(cfg, frames, out_dir, ema=True, dead_reinit=True):
                 f"commit {logs['commit']:.4f} perplexity {logs['perplexity']:.1f} "
                 f"active {model.quantizer.active_codes()}/256"
             )
-    hist = model.quantizer.usage_histogram(normalize=True).numpy()
+    hist = model.quantizer.usage_histogram().cpu().numpy()
     np.savetxt(out_dir / "codebook_usage.csv", hist, header="usage_fraction", comments="")
     torch.save({"state_dict": model.state_dict(), "base": cfg["vq_base"]}, out_dir / "vqvae.pt")
     return model
 
 
 def load_vq(out_dir) -> VQVAE:
-    ckpt = torch.load(out_dir / "vqvae.pt", weights_only=True)
+    ckpt = torch.load(out_dir / "vqvae.pt", map_location="cpu", weights_only=True)
     model = VQVAE(num_codes=256, code_dim=64, base=ckpt["base"])
     model.load_state_dict(ckpt["state_dict"])
     return model
@@ -139,33 +135,34 @@ def load_vq(out_dir) -> VQVAE:
 def encode_dataset(vqvae, frames) -> np.ndarray:
     """frames (E, T, 64, 64, 3) uint8 -> tokens (E, T, 64) int64."""
     vqvae.eval()
+    device = next(vqvae.parameters()).device
     E, T = frames.shape[:2]
     out = np.empty((E, T, 64), dtype=np.int64)
     for e in range(E):
         for start in range(0, T, 64):
-            chunk = frames_to_tensor(frames[e, start : start + 64])
-            out[e, start : start + 64] = vqvae.encode_to_indices(chunk).numpy()
+            chunk = frames_to_tensor(frames[e, start : start + 64]).to(device)
+            out[e, start : start + 64] = vqvae.encode_to_indices(chunk).cpu().numpy()
     return out
 
 
-def train_dyn(cfg, tokens, actions, out_dir):
+def train_dyn(cfg, tokens, actions, out_dir, device="cpu"):
     gpt_cfg = GPTConfig(
         d_model=cfg["d_model"],
         n_heads=cfg["n_heads"],
         n_layers=cfg["n_layers"],
         max_frames=cfg["max_frames"],
     )
-    model = TokenGPT(gpt_cfg)
+    model = TokenGPT(gpt_cfg).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
-    rng = np.random.default_rng(1)
+    rng = np.random.default_rng(cfg["seed"] + 2)
     E, T = tokens.shape[:2]
     W = cfg["seq_frames"]
     model.train()
     for step in range(cfg["dyn_steps"]):
         eps = rng.integers(0, E, size=cfg["dyn_batch"])
         starts = rng.integers(0, T - W, size=cfg["dyn_batch"])
-        tok = torch.from_numpy(np.stack([tokens[e, s : s + W] for e, s in zip(eps, starts)]))
-        act = torch.from_numpy(np.stack([actions[e, s : s + W] for e, s in zip(eps, starts)]))
+        tok = torch.from_numpy(np.stack([tokens[e, s : s + W] for e, s in zip(eps, starts)])).to(device)
+        act = torch.from_numpy(np.stack([actions[e, s : s + W] for e, s in zip(eps, starts)])).to(device)
         logits = model(act, tok)
         loss = sequence_loss(logits, tok)
         opt.zero_grad()
@@ -178,13 +175,6 @@ def train_dyn(cfg, tokens, actions, out_dir):
                 acc = (logits.argmax(-1)[valid] == tgt[valid]).float().mean().item()
             print(f"[dyn] step {step:6d} ce {loss.item():.4f} acc {acc:.3f}")
     torch.save({"state_dict": model.state_dict(), "cfg": vars(gpt_cfg)}, out_dir / "gpt.pt")
-    return model
-
-
-def load_dyn(out_dir) -> TokenGPT:
-    ckpt = torch.load(out_dir / "gpt.pt", weights_only=True)
-    model = TokenGPT(GPTConfig(**ckpt["cfg"]))
-    model.load_state_dict(ckpt["state_dict"])
     return model
 
 
@@ -212,6 +202,7 @@ def main():
     p.add_argument("--future", type=int, default=None, help="future frames for the rollout")
     p.add_argument("--no-ema", action="store_true", help="break-it lab: freeze codebook updates")
     p.add_argument("--no-dead-reinit", action="store_true", help="break-it lab: no dead-code reinit")
+    p.add_argument("--device", default="cpu", help="training device, e.g. cuda")
     args = p.parse_args()
 
     if args.smoke:
@@ -222,7 +213,7 @@ def main():
     # Seed torch too (numpy generators are seeded locally): weight init and
     # temperature sampling both draw from the global torch RNG, and repeated
     # runs should be reproducible, e.g. the temperature-0 lab in exercises.md.
-    torch.manual_seed(0)
+    torch.manual_seed(cfg["seed"])
     if args.context is not None:
         cfg["context"] = args.context
     if args.future is not None:
@@ -240,14 +231,15 @@ def main():
     vqvae = None
     if args.phase in ("vq", "all"):
         vqvae = train_vq(cfg, frames, out_dir, ema=not args.no_ema,
-                         dead_reinit=not args.no_dead_reinit)
+                         dead_reinit=not args.no_dead_reinit, device=args.device)
     if args.phase in ("dyn", "all"):
         if vqvae is None:
             if not (out_dir / "vqvae.pt").exists():
                 raise SystemExit("no vqvae.pt found, run --phase vq (or all) first")
             vqvae = load_vq(out_dir)
+        vqvae = vqvae.to(args.device)
         tokens = encode_dataset(vqvae, frames)
-        gpt = train_dyn(cfg, tokens, actions, out_dir)
+        gpt = train_dyn(cfg, tokens, actions, out_dir, device=args.device)
         run_rollout(cfg, vqvae, gpt, frames, actions, out_dir, args.temperature)
 
     print(f"[done] total {time.time() - t0:.1f}s, outputs in {out_dir}")

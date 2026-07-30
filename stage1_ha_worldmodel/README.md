@@ -44,9 +44,9 @@ Defaults in `train.py` are the full config; drop `--smoke`.
 1. Collection: 2000 episodes x 1000 steps, about 2M frames. Box2D is
    CPU-bound; a single process takes 2-3 h, so shard across processes if
    impatient. Cached to one npz, reused afterwards.
-2. `train.py vae`: batch 256, 30k steps. About 1-1.5 h. Recon (sum MSE per
+2. `train.py vae --device cuda`: batch 256, 30k steps. About 1-1.5 h. Recon (sum MSE per
    frame) settling around 20-40 is normal.
-3. `train.py mdnrnn`: batch 128, seq len 64, 20k steps. About 1-1.5 h. NLL
+3. `train.py mdnrnn --device cuda`: batch 128, seq len 64, 20k steps. About 1-1.5 h. NLL
    goes negative; that is expected for continuous densities.
 4. `train.py controller`: CMA-ES pop 64, 400 generations in the dream at
    T = 1.15, minutes on CPU. For the faithful paper variant use `--real`

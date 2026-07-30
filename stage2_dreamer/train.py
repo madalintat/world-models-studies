@@ -57,10 +57,6 @@ class Config:
     smoke: bool = False
 
 
-def full_config():
-    return Config()
-
-
 def smoke_config():
     return Config(
         total_env_steps=100, episode_max_steps=100, action_repeat=1,
@@ -151,10 +147,6 @@ def collect_random_episode_cached(env, cfg):
     return obs, action, reward, cont
 
 
-def flatten_states(hs, zs):
-    return hs.flatten(0, 1), zs.flatten(0, 1)
-
-
 def train(cfg):
     torch.manual_seed(cfg.seed)
     device = torch.device(cfg.device)
@@ -202,15 +194,20 @@ def train(cfg):
             last_metrics.update(wm_metrics)
 
         for _ in range(cfg.ac_steps_per_iter):
-            h0, z0 = flatten_states(*start_states)
+            h0 = start_states[0].flatten(0, 1)
+            z0 = start_states[1].flatten(0, 1)
             actor_loss, critic_loss, ac_metrics = ac_losses(
                 wm, actor, critic, h0, z0, cfg.horizon)
+            # The actor only needs gradients through activations; freezing
+            # the world model and critic skips their weight-gradient work.
+            wm.requires_grad_(False)
+            critic.requires_grad_(False)
             actor_opt.zero_grad()
             actor_loss.backward()
+            wm.requires_grad_(True)
+            critic.requires_grad_(True)
             torch.nn.utils.clip_grad_norm_(actor.parameters(), cfg.grad_clip)
             actor_opt.step()
-            # The actor backward also deposited grads into the critic and
-            # world model; zero_grad calls before their own steps clear them.
             critic_opt.zero_grad()
             critic_loss.backward()
             torch.nn.utils.clip_grad_norm_(critic.parameters(), cfg.grad_clip)
@@ -241,8 +238,12 @@ def main():
                    help="argmax instead of sampling z (break-it lab)")
     p.add_argument("--horizon", type=int, default=None,
                    help="imagination horizon (prediction exercise: try 50)")
+    p.add_argument("--device", default=None,
+                   help="training device for the full run, e.g. cuda")
     args = p.parse_args()
-    cfg = smoke_config() if args.smoke else full_config()
+    cfg = smoke_config() if args.smoke else Config()
+    if args.device is not None:
+        cfg.device = args.device
     if args.kl_alpha is not None:
         cfg.kl_alpha = args.kl_alpha
     if args.det_z:

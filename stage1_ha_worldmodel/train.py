@@ -2,9 +2,13 @@
 
 Usage:
     uv run python -m stage1_ha_worldmodel.train --smoke            # whole chain, tiny, CPU
-    uv run python -m stage1_ha_worldmodel.train vae
-    uv run python -m stage1_ha_worldmodel.train mdnrnn
+    uv run python -m stage1_ha_worldmodel.train vae --device cuda
+    uv run python -m stage1_ha_worldmodel.train mdnrnn --device cuda
     uv run python -m stage1_ha_worldmodel.train controller [--real]
+
+--device applies to VAE and MDN-RNN training and to encoding. The
+controller phase always runs on CPU: CMA-ES is numpy and the dream is
+single-step LSTM calls, where GPU transfer overhead loses.
 
 FULL config (the defaults below) is written for one RTX 5090 and is
 documentation: only --smoke has been executed here.
@@ -40,7 +44,8 @@ from stage1_ha_worldmodel.cmaes import CMAES
 from stage1_ha_worldmodel.dream import dream_rollout, write_dream_video
 from stage1_ha_worldmodel.mdnrnn import MDNRNN, mdn_nll
 from stage1_ha_worldmodel.s1_controller import Controller
-from stage1_ha_worldmodel.s1_data import iter_episodes, load_or_collect, resize64
+from stage1_ha_worldmodel.s1_data import (frames_to_tensor, iter_episodes,
+                                          load_or_collect, resize64)
 from stage1_ha_worldmodel.s1_vae import ConvVAE, vae_loss
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "stage1_ha_worldmodel"
@@ -58,20 +63,16 @@ SMOKE = dict(episodes=2, max_steps=110, seed=7,
              dream_rollouts=1, temperature=1.0, video_horizon=60)
 
 
-def frames_to_tensor(frames_u8: np.ndarray) -> torch.Tensor:
-    return torch.from_numpy(frames_u8).float().permute(0, 3, 1, 2) / 255.0
-
-
-def train_vae(cfg, data, ckpt_dir: Path) -> ConvVAE:
+def train_vae(cfg, data, ckpt_dir: Path, device: str = "cpu") -> ConvVAE:
     torch.manual_seed(cfg["seed"])
-    vae = ConvVAE()
+    vae = ConvVAE().to(device)
     opt = torch.optim.Adam(vae.parameters(), lr=cfg["vae_lr"])
     frames = data["frames"]
     rng = np.random.default_rng(cfg["seed"])
     t0 = time.time()
     for step in range(cfg["vae_steps"]):
         idx = rng.integers(0, len(frames), cfg["vae_batch"])
-        x = frames_to_tensor(frames[idx])
+        x = frames_to_tensor(frames[idx]).to(device)
         recon, mu, logvar = vae(x)
         loss, rec, kl = vae_loss(recon, x, mu, logvar)
         opt.zero_grad()
@@ -90,21 +91,22 @@ def encode_data(vae: ConvVAE, data, seed: int):
     """Encode each episode to a sampled latent sequence, as in the paper:
     sampling (not just mu) gives the RNN some robustness to encoder noise."""
     torch.manual_seed(seed)
+    device = next(vae.parameters()).device
     episodes = []
     for frames, actions in iter_episodes(data):
-        mu, logvar = vae.encode(frames_to_tensor(frames))
+        mu, logvar = vae.encode(frames_to_tensor(frames).to(device))
         z = vae.reparameterize(mu, logvar)
-        episodes.append((z.numpy().astype(np.float32), actions))
+        episodes.append((z.cpu().numpy().astype(np.float32), actions))
     return episodes
 
 
-def train_mdnrnn(cfg, latents, ckpt_dir: Path) -> MDNRNN:
+def train_mdnrnn(cfg, latents, ckpt_dir: Path, device: str = "cpu") -> MDNRNN:
     torch.manual_seed(cfg["seed"] + 1)
-    model = MDNRNN()
+    model = MDNRNN().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg["mdn_lr"])
     L = cfg["mdn_seq_len"]
     starts = [(i, s) for i, (z, _) in enumerate(latents)
-              for s in range(0, len(z) - L - 1)]
+              for s in range(0, len(z) - L)]
     rng = np.random.default_rng(cfg["seed"] + 1)
     t0 = time.time()
     for step in range(cfg["mdn_steps"]):
@@ -116,9 +118,9 @@ def train_mdnrnn(cfg, latents, ckpt_dir: Path) -> MDNRNN:
             zs.append(z[s:s + L])
             acts.append(a[s:s + L])
             zn.append(z[s + 1:s + L + 1])
-        z_in = torch.from_numpy(np.stack(zs))
-        a_in = torch.from_numpy(np.stack(acts))
-        z_next = torch.from_numpy(np.stack(zn))
+        z_in = torch.from_numpy(np.stack(zs)).to(device)
+        a_in = torch.from_numpy(np.stack(acts)).to(device)
+        z_next = torch.from_numpy(np.stack(zn)).to(device)
         (logpi, mu, logstd), _ = model(z_in, a_in)
         loss = mdn_nll(logpi, mu, logstd, z_next)
         opt.zero_grad()
@@ -154,12 +156,24 @@ def real_return(controller, vae, mdnrnn, seed: int, max_steps: int) -> float:
     return total
 
 
-def train_controller(cfg, vae, mdnrnn, latents, ckpt_dir: Path,
-                     real: bool = False, temperature: float | None = None):
-    T = cfg["temperature"] if temperature is None else temperature
+@torch.no_grad()
+def encode_first_frames(vae, data) -> np.ndarray:
+    """Dream start states: the encoded first frame of each episode."""
+    device = next(vae.parameters()).device
+    first = np.stack([f[0] for f, _ in iter_episodes(data)])
+    mu, _ = vae.encode(frames_to_tensor(first).to(device))
+    return mu.cpu().numpy().astype(np.float32)
+
+
+def train_controller(cfg, vae, mdnrnn, z_starts, ckpt_dir: Path,
+                     temperature: float, real: bool = False):
+    # CMA-ES is numpy and the dream is single-step LSTM calls: CPU work,
+    # regardless of where the earlier phases trained. See module docstring.
+    vae.cpu().eval()
+    mdnrnn.cpu().eval()
+    T = temperature
     controller = Controller(z_dim=mdnrnn.z_dim, hidden_dim=mdnrnn.hidden_dim)
     print(f"controller parameters: {controller.param_count()}")
-    z_starts = np.stack([z[0] for z, _ in latents])
     es = CMAES(np.zeros(controller.param_count()), cfg["cma_sigma0"],
                popsize=cfg["cma_pop"], seed=cfg["seed"] + 2)
     rng = np.random.default_rng(cfg["seed"] + 2)
@@ -210,6 +224,8 @@ def main():
                          "instead of the dream")
     ap.add_argument("--temperature", type=float, default=None,
                     help="dream temperature for controller training and video")
+    ap.add_argument("--device", default="cpu",
+                    help="device for VAE/MDN-RNN training, e.g. cuda")
     args = ap.parse_args()
 
     # Small CPU models scale badly past a few threads.
@@ -227,36 +243,35 @@ def main():
 
     def load_vae():
         vae = ConvVAE()
-        vae.load_state_dict(torch.load(ckpt_dir / "vae.pt",
+        vae.load_state_dict(torch.load(ckpt_dir / "vae.pt", map_location="cpu",
                                        weights_only=True))
         return vae
 
     def load_mdn():
         m = MDNRNN()
-        m.load_state_dict(torch.load(ckpt_dir / "mdnrnn.pt",
+        m.load_state_dict(torch.load(ckpt_dir / "mdnrnn.pt", map_location="cpu",
                                      weights_only=True))
         return m
 
     if args.stage in ("vae", "all"):
-        vae = train_vae(cfg, data, ckpt_dir)
+        vae = train_vae(cfg, data, ckpt_dir, device=args.device)
     else:
         vae = load_vae()
 
     if args.stage in ("mdnrnn", "all"):
+        vae = vae.to(args.device)
         latents = encode_data(vae, data, cfg["seed"])
-        mdnrnn = train_mdnrnn(cfg, latents, ckpt_dir)
+        mdnrnn = train_mdnrnn(cfg, latents, ckpt_dir, device=args.device)
     elif args.stage == "controller":
         mdnrnn = load_mdn()
-        latents = encode_data(vae, data, cfg["seed"])
     else:
         mdnrnn = None
 
     if args.stage in ("controller", "all"):
-        vae.eval()
-        mdnrnn.eval()
-        train_controller(cfg, vae, mdnrnn, latents, ckpt_dir,
-                         real=args.real, temperature=args.temperature)
         T = cfg["temperature"] if args.temperature is None else args.temperature
+        z_starts = encode_first_frames(vae, data)
+        train_controller(cfg, vae, mdnrnn, z_starts, ckpt_dir,
+                         temperature=T, real=args.real)
         frames, actions = next(iter_episodes(data))
         n = min(cfg["video_horizon"], len(frames))
         path = write_dream_video(vae, mdnrnn, frames[:n], actions[:n],

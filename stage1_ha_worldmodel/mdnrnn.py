@@ -46,14 +46,16 @@ class MDNRNN(nn.Module):
 
 
 def mdn_nll(logpi, mu, logstd, z_next):
-    """Mean negative log likelihood of z_next under the per-dim mixtures.
+    """Negative log likelihood of z_next under the per-dim mixtures.
 
     z_next: (B, T, z_dim). Params: (B, T, z_dim, n_gaussians).
+    The joint log likelihood of a latent vector sums over its independent
+    dimensions; the result is then averaged over batch and time.
     """
     target = z_next.unsqueeze(-1)
     log_prob = -0.5 * ((target - mu) / logstd.exp()) ** 2 - logstd - 0.5 * LOG_2PI
     log_mix = torch.logsumexp(logpi + log_prob, dim=-1)
-    return -log_mix.mean()
+    return -log_mix.sum(dim=-1).mean()
 
 
 def mdn_sample(logpi, mu, logstd, temperature: float = 1.0, generator=None):

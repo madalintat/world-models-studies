@@ -36,7 +36,7 @@ Lab and exercise flags: `--kl-alpha 0.0`, `--det-z`, `--horizon 50`. See
 ## Full run, one RTX 5090
 
 Defaults in `full_config()` in `train.py`: 500k env steps at action repeat 2,
-batch 32 x sequence 16 (set `device="cuda"` in the config for the GPU),
+batch 32 x sequence 16 (pass `--device cuda` for the GPU),
 deter 512, depth 32, about 100 world model and 100
 actor-critic gradient steps per collected episode, roughly 50k of each over
 the run. Expect 6 to 10 hours wall clock. Expected outcome: the car visibly

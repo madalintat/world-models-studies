@@ -35,7 +35,6 @@ def rollout(
     taus, betas = make_ladder(k_steps, device=prefill.device)
     frames = prefill.clone()
     is_gt = [True] * t0
-    outs = []
     for t in range(t0, t0 + horizon):
         start = max(0, t + 1 - window)
         ctx = frames[:, start:t]
@@ -58,8 +57,7 @@ def rollout(
             z = euler_mix(z, x_hat, betas[step])
         frames = torch.cat([frames, z], dim=1)
         is_gt.append(False)
-        outs.append(z)
-    return torch.cat(outs, dim=1)
+    return frames[:, t0:]
 
 
 def psnr(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

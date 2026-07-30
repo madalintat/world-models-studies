@@ -4,7 +4,7 @@ import torch
 import torch.distributions as td
 import torch.nn as nn
 
-from stage2_dreamer.s2_wm import symexp, symlog
+from stage2_dreamer.s2_wm import ScalarHead, symexp, symlog
 
 GAMMA = 0.997
 LAMBDA = 0.95
@@ -41,19 +41,8 @@ class Actor(nn.Module):
         return action, entropy
 
 
-class Critic(nn.Module):
+class Critic(ScalarHead):
     """Predicts the symlog of the lambda return of [h, z]."""
-
-    def __init__(self, feat_dim, hidden_dim=256):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(feat_dim, hidden_dim), nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.SiLU(),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, feat):
-        return self.net(feat).squeeze(-1)
 
 
 def imagine(wm, actor, h, z, horizon):

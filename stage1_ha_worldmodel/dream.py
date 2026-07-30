@@ -22,12 +22,24 @@ import torch
 import imageio
 
 from stage1_ha_worldmodel.mdnrnn import mdn_sample
+from stage1_ha_worldmodel.s1_data import frames_to_tensor
 
 
 def proxy_reward(action: torch.Tensor, z_next: torch.Tensor) -> float:
     steer, gas, brake = (float(action[0]), float(action[1]), float(action[2]))
     off_manifold = float((z_next ** 2).mean())
     return gas - brake - 0.1 * abs(steer) - 0.05 * off_manifold
+
+
+def mdn_step(mdnrnn, z, a, hidden, temperature, generator):
+    """One latent advance: run the RNN on (z_t, a_t), sample z_{t+1}.
+
+    z: (1, 1, z_dim), a: (1, 1, action_dim). Returns (z_next (1, 1, z_dim), hidden).
+    """
+    (logpi, mu, logstd), hidden = mdnrnn(z, a, hidden)
+    z_next = mdn_sample(logpi[:, -1], mu[:, -1], logstd[:, -1],
+                        temperature=temperature, generator=generator)
+    return z_next.view(1, 1, -1), hidden
 
 
 @torch.no_grad()
@@ -41,12 +53,11 @@ def dream_rollout(mdnrnn, controller, z0: torch.Tensor, horizon: int,
     zs, actions, rewards = [z.view(-1).clone()], [], []
     for _ in range(horizon):
         a = controller(z.view(1, -1), h)
-        (logpi, mu, logstd), hidden = mdnrnn(z, a.view(1, 1, -1), hidden)
-        z_next = mdn_sample(logpi[:, -1], mu[:, -1], logstd[:, -1],
-                            temperature=temperature, generator=generator)
+        z_next, hidden = mdn_step(mdnrnn, z, a.view(1, 1, -1), hidden,
+                                  temperature, generator)
         rewards.append(proxy_reward(a.view(-1), z_next))
         actions.append(a.view(-1).clone())
-        z = z_next.view(1, 1, -1)
+        z = z_next
         h = hidden[0].view(1, -1)
         zs.append(z.view(-1).clone())
     return dict(zs=torch.stack(zs), actions=torch.stack(actions),
@@ -65,20 +76,16 @@ def write_dream_video(vae, mdnrnn, frames_u8: np.ndarray, actions: np.ndarray,
     panel isolates VAE blur from that drift.
     """
     device = next(vae.parameters()).device
-    x = torch.from_numpy(frames_u8).float().permute(0, 3, 1, 2).to(device) / 255.0
-    mu, _ = vae.encode(x)
+    mu, _ = vae.encode(frames_to_tensor(frames_u8).to(device))
     recon = vae.decode(mu)
 
-    gen = torch.Generator(device="cpu").manual_seed(seed)
+    gen = torch.Generator(device=device.type).manual_seed(seed)
     z = mu[0].view(1, 1, -1)
     hidden = None
     dream_zs = [z.view(-1).clone()]
     for t in range(len(actions) - 1):
-        a = torch.from_numpy(actions[t]).float().view(1, 1, -1)
-        (logpi, mu_p, logstd), hidden = mdnrnn(z, a, hidden)
-        z_next = mdn_sample(logpi[:, -1], mu_p[:, -1], logstd[:, -1],
-                            temperature=temperature, generator=gen)
-        z = z_next.view(1, 1, -1)
+        a = torch.from_numpy(actions[t]).float().view(1, 1, -1).to(device)
+        z, hidden = mdn_step(mdnrnn, z, a, hidden, temperature, gen)
         dream_zs.append(z.view(-1).clone())
     dream_frames = vae.decode(torch.stack(dream_zs))
 

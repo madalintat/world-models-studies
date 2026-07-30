@@ -82,4 +82,4 @@ def noise_context(z_ctx: torch.Tensor, tau_ctx: float, generator=None) -> torch.
     """Partially re-noise context latents to tau_ctx, matching the training
     distribution where context frames were independently corrupted."""
     noise = torch.randn(z_ctx.shape, generator=generator, device=z_ctx.device, dtype=z_ctx.dtype)
-    return tau_ctx * z_ctx + (1.0 - tau_ctx) * noise
+    return interpolate(noise, z_ctx, torch.as_tensor(tau_ctx, dtype=z_ctx.dtype, device=z_ctx.device))
