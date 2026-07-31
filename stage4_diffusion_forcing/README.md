@@ -13,13 +13,18 @@ one. Then do `exercises.md`.
 ## Files
 
 - `flow.py`: flow matching core (interpolation, per-frame tau sampling,
-  weighted x-space loss, tau ladder, Euler mixing, context noising)
+  weighted x-space loss, tau ladder, Euler mixing, context noising) plus
+  the inference-time scheduling matrix. One function in here,
+  `_pyramid_schedule`, is deliberately left for you to write; break-it lab
+  D in `exercises.md` has the brief and three tests skip until you do.
 - `s4_latent_ae.py`: deterministic conv AE, mirrors stage 0's VAE minus the
   variational part
 - `s4_model.py`: temporal transformer, per-frame tokens
   [action, tau, 64 latents], alternating full-within-frame and
-  causal-across-time attention
-- `sampling4.py`: autoregressive tau-ladder rollout, drift curve, gif
+  causal-across-time attention, with the action-injection mechanism
+  selectable (token, additive, FiLM)
+- `sampling4.py`: autoregressive tau-ladder rollout (`rollout`) and
+  scheduled block rollout (`rollout_block`), drift curve, gif
 - `train.py`: end to end (collect, AE, dynamics, rollout, drift csv)
 - `tests/test_stage4_diffusion_forcing.py`
 
@@ -33,6 +38,19 @@ one. Then do `exercises.md`.
     uv run python -m stage4_diffusion_forcing.train --smoke --weighting v_space
     uv run python -m stage4_diffusion_forcing.train --smoke --tau-ctx 0.5
     uv run python -m stage4_diffusion_forcing.train --smoke --k-steps 1
+
+    # how the action reaches the model (nano-world-model's ablation axis)
+    uv run python -m stage4_diffusion_forcing.train --smoke \
+        --injection additive
+    uv run python -m stage4_diffusion_forcing.train --smoke --injection film
+
+    # inference-time scheduling, and the SD3 noise-level distribution
+    uv run python -m stage4_diffusion_forcing.train --smoke \
+        --schedule full_sequence
+    uv run python -m stage4_diffusion_forcing.train --smoke \
+        --schedule pyramid --stagger 1
+    uv run python -m stage4_diffusion_forcing.train --smoke \
+        --tau-sampling logit_normal
 
     # tests
     uv run pytest stage4_diffusion_forcing/tests -q

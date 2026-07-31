@@ -32,12 +32,14 @@ from stage4_diffusion_forcing.flow import (
     flow_matching_loss,
     interpolate,
     sample_frame_taus,
+    scheduling_matrix,
 )
 from stage4_diffusion_forcing.s4_latent_ae import LatentAE
 from stage4_diffusion_forcing.s4_model import DynamicsTransformer
 from stage4_diffusion_forcing.sampling4 import (
     drift_curve,
     rollout,
+    rollout_block,
     save_drift_csv,
     save_rollout_video,
 )
@@ -189,6 +191,7 @@ def train_dynamics(
     clean_context: bool,
     generator: torch.Generator,
     device: str = "cpu",
+    tau_sampling: str = "uniform",
 ) -> None:
     opt = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
     t_len = cfg["seq_len"]
@@ -207,7 +210,9 @@ def train_dynamics(
             mask = torch.zeros(b, t_len).to(device)
             mask[:, -1] = 1.0
         else:
-            tau = sample_frame_taus(b, t_len, generator=generator)
+            tau = sample_frame_taus(
+                b, t_len, scheme=tau_sampling, generator=generator
+            )
             mask = None
         # Sample on the CPU generator for reproducibility, then move.
         noise = torch.randn(z.shape, generator=generator).to(device)
@@ -238,6 +243,31 @@ def main() -> None:
         help="context noise level at rollout (default 0.9, or 1.0 with --clean-context)",
     )
     p.add_argument("--k-steps", type=int, default=None, help="tau ladder steps")
+    p.add_argument(
+        "--tau-sampling",
+        default="uniform",
+        choices=["uniform", "logit_normal"],
+        help="training noise-level distribution (logit_normal is the SD3 recipe)",
+    )
+    p.add_argument(
+        "--injection",
+        default="token",
+        choices=["token", "additive", "film"],
+        help="how the action reaches the dynamics model",
+    )
+    p.add_argument(
+        "--schedule",
+        default="sequential",
+        choices=["sequential", "pyramid", "full_sequence"],
+        help="rollout scheduling mode; non-sequential modes generate one "
+        "block inside the model's window",
+    )
+    p.add_argument(
+        "--stagger",
+        type=int,
+        default=1,
+        help="pyramid schedule: rows of delay between consecutive frames",
+    )
     p.add_argument("--out", default=None, help="output directory")
     p.add_argument("--device", default="cpu", help="training device, e.g. cuda")
     args = p.parse_args()
@@ -292,7 +322,11 @@ def main() -> None:
     actions = torch.from_numpy(data["actions"])
     starts = build_windows(data["ep_ids"], cfg["seq_len"])
 
-    print(f"training dynamics (weighting={args.weighting}, clean_context={args.clean_context})")
+    print(
+        f"training dynamics (weighting={args.weighting}, "
+        f"clean_context={args.clean_context}, injection={args.injection}, "
+        f"tau_sampling={args.tau_sampling})"
+    )
     model = DynamicsTransformer(
         latent_dim=8,
         n_latent_tokens=64,
@@ -300,30 +334,68 @@ def main() -> None:
         n_heads=cfg["n_heads"],
         depth=cfg["depth"],
         max_t=cfg["seq_len"],
+        injection=args.injection,
     ).to(args.device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"  dynamics params: {n_params}")
     train_dynamics(
         model, latents, actions, starts, cfg, args.weighting, args.clean_context,
-        generator, device=args.device,
+        generator, device=args.device, tau_sampling=args.tau_sampling,
     )
     # The rollout and decode are a one-off evaluation; running them on CPU
     # keeps the sampling generator simple (one CPU generator end to end).
     model = model.cpu()
     ae = ae.cpu()
 
-    print(f"rollout: {cfg['k_steps']}-step ladder, tau_ctx={tau_ctx}")
+    horizon = cfg["horizon"]
+    if args.schedule != "sequential":
+        # A block schedule denoises every generated frame inside one model
+        # window, so the block cannot be longer than the window allows.
+        room = cfg["seq_len"] - cfg["prefill"]
+        if horizon > room:
+            print(
+                f"  note: --schedule {args.schedule} generates one block, so "
+                f"horizon {horizon} is capped at {room} "
+                f"(seq_len {cfg['seq_len']} - prefill {cfg['prefill']})"
+            )
+            horizon = room
+
     p0 = int(starts[0])
     prefill = latents[p0 : p0 + cfg["prefill"]].unsqueeze(0)
-    span = cfg["prefill"] + cfg["horizon"]
+    span = cfg["prefill"] + horizon
     act_span = actions[p0 : p0 + span].unsqueeze(0)
-    gen = rollout(
-        model,
-        prefill,
-        act_span,
-        horizon=cfg["horizon"],
-        k_steps=cfg["k_steps"],
-        tau_ctx=tau_ctx,
-        generator=generator,
-    )
+    if args.schedule == "sequential":
+        print(f"rollout: {cfg['k_steps']}-step ladder, tau_ctx={tau_ctx}")
+        gen = rollout(
+            model,
+            prefill,
+            act_span,
+            horizon=horizon,
+            k_steps=cfg["k_steps"],
+            tau_ctx=tau_ctx,
+            generator=generator,
+        )
+        calls = cfg["k_steps"] * horizon
+    else:
+        matrix = scheduling_matrix(
+            args.schedule, cfg["k_steps"], horizon, args.stagger
+        )
+        calls = matrix.shape[0] - 1
+        print(
+            f"rollout: {args.schedule} schedule, {cfg['k_steps']}-step ladder, "
+            f"{horizon} frames in one block"
+        )
+        gen = rollout_block(
+            model,
+            prefill,
+            act_span,
+            horizon=horizon,
+            k_steps=cfg["k_steps"],
+            mode=args.schedule,
+            stagger=args.stagger,
+            generator=generator,
+        )
+    print(f"  model calls for {horizon} frames: {calls}")
     with torch.no_grad():
         z_grid = LatentAE.from_tokens(gen[0] * std + mean)
         pred_pixels = ae.decode(z_grid)

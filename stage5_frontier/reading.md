@@ -16,8 +16,14 @@ the stages are the decompressor.
 
 - Hafner et al., "Learning Latent Dynamics for Planning from Pixels"
   (PlaNet, 2019). Introduces the RSSM you built in stage 2; read it for
-  the deterministic-plus-stochastic state argument, and skip the planning
-  half (CEM) that history discarded.
+  the deterministic-plus-stochastic state argument, and do not skip the
+  planning half. Dreamer replaced CEM with a learned actor and the field
+  followed, but planning on top of a learned model came back: Simchowitz
+  lab's nano-world-model (2026) ships CEM model-predictive control over a
+  diffusion world model as one of three headline applications, and it
+  trains no policy at all. Sampling action sequences and scoring them with
+  the model is the cheapest way to turn any of your stages 1 through 4
+  into a controller.
 - Hafner et al., "Dream to Control" (DreamerV1, 2020). Replaces PlaNet's
   planner with an actor-critic trained by backprop through imagined
   latent trajectories, which is the single move that made world models a
@@ -77,3 +83,35 @@ the stages are the decompressor.
   modes at a scale a small team can actually replicate; read it last,
   after the code, and it reads like a colleague's postmortem instead of
   an announcement.
+- Huang et al., "Nano World Models: A Minimalist Implementation of
+  Future Video Prediction" (2026, arXiv 2605.23993). The paper for the
+  repo toured in `guide_nano_world_model.md`, and the most useful thing
+  on this list per page: it ablates prediction target, action injection,
+  and model scale head to head and publishes the tables, so it functions
+  as an answer key to stage 4's prediction exercises. Read it for the
+  method of the ablations rather than the winners.
+
+## Keeping this list alive
+
+This list is deliberately short and stops where the course stops. Two
+public indexes track the field week by week and are the right place to
+go when you want breadth instead of sequence:
+
+- github.com/nik-55/world-models. A curated table of reports, code and
+  blogs, currently reaching into 2026, plus links onward to the larger
+  Awesome-World-Model lists. Useful precisely because it is dated: you
+  can see how fast the interactive-world-generation line is moving
+  against the robotics line.
+- The benchmark entries there are the part to watch, because the honest
+  bottleneck in this field is evaluation, not architecture. WorldScore,
+  World-in-World, Omni-WorldBench and WM-Gym (see `wmgym.md`) are all
+  attempts at the same problem: scoring a world model by whether its
+  predictions are good enough to act on, rather than by how the frames
+  look.
+
+A warning about lists like these. They are optimized for recall, not
+precision, and reading them front to back is a good way to feel busy
+while learning nothing. Use one when you have a specific question
+(who else conditions on actions this way, what is the state of long-
+horizon memory) and ignore it otherwise. The stages are the
+decompressor; a list of titles is not.
