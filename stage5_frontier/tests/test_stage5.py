@@ -117,6 +117,7 @@ def test_all_deliverables_exist():
         "README.md",
         "exercises.md",
         "guide_open_dreamer.md",
+        "guide_nano_world_model.md",
         "research.md",
         "wmgym.md",
         "robotics.md",

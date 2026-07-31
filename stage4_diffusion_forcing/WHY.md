@@ -99,6 +99,84 @@ which is about what a generated frame deserves. Ground-truth prefill frames
 stay clean at tau 1, matching open-dreamer's `next_latent`, which noises
 only the frames the model decoded itself.
 
+## The scheduling matrix: where diffusion forcing actually pays out
+
+Everything above is about training. The payout is at inference, and it is
+easy to miss because the obvious sampler hides it.
+
+Because training gave every frame an independent tau, the model has seen
+essentially every combination of noise levels across a window. So at
+sampling time you may assign any noise level to any frame and the model
+will accept it. That freedom is a matrix: rows are sampling steps, columns
+are frames, and entry (r, f) is the rung of the tau ladder that frame f
+occupies at step r. `scheduling_matrix` in `flow.py` builds it, and
+`rollout_block` in `sampling4.py` walks it.
+
+Three corners are worth naming:
+
+- `full_sequence`: every frame moves up the ladder together. This is
+  ordinary video diffusion, where the clip is one object. K + 1 rows, so K
+  model calls total no matter how many frames you generate. Cheapest, but
+  no frame is ever conditioned on a finished neighbour, so long blocks lose
+  temporal coherence.
+- `sequential`: frame f does not start until frame f-1 is completely clean.
+  This is autoregression, and it is what the `rollout` function in this
+  stage does. K * n_frames model calls: the most expensive corner, and the
+  one whose per-frame conditioning is strongest.
+- `pyramid`: frame f starts `stagger` rows behind frame f-1, so the block
+  is denoised as one sweeping wavefront. K + stagger * (n_frames - 1) + 1
+  rows. Each frame is conditioned on neighbours that are partly denoised
+  rather than either finished or pure noise.
+
+The two extremes are the same function: pyramid with stagger = 0 is
+`full_sequence`, and pyramid with stagger = K is `sequential`. That is the
+sense in which diffusion forcing "unifies teacher forcing and full-sequence
+diffusion", a sentence in the paper that stays abstract until you have
+built the matrix and watched the corners fall out of one formula.
+
+Concretely, in the smoke config (K = 4, four generated frames):
+`full_sequence` costs 4 model calls, `sequential` costs 16. That ratio is
+the entire reason anyone cares, and it grows with the block length.
+
+Note the honest limit of the block sampler: every frame it generates has to
+fit inside the model's attention window at once, so blocks are bounded by
+`seq_len - prefill`. Generating a hundred frames still means sliding the
+window, which reintroduces the re-noised context of the section above. The
+two mechanisms compose; they do not replace each other.
+
+## How the action gets in
+
+The action has to reach the network somehow, and this stage's default
+(one action token per frame, sitting in the space sequence next to the tau
+token) is a choice presented as if it were the only one. It is not, and
+the alternatives differ in cost:
+
+- `token`: the action embedding is an extra token, reached by attention.
+  Costs one sequence slot per frame forever.
+- `additive`: the action embedding is added to every latent token of its
+  frame before the blocks. Zero extra parameters, zero sequence cost.
+- `film`: every block scales and shifts its MLP input by a per-frame affine
+  map predicted from the action, so the action modulates computation at
+  every depth. Costs a modulation head per block.
+
+nano-world-model ablates these plus adaLN and cross-attention head to head
+and publishes the numbers. Their finding: for low-dimensional actions the
+mechanism barely matters (all five land within 0.32 PSNR on 2D PushT
+actions, with plain additive winning at zero extra cost), FiLM edges ahead
+on 7D robot actions, and cross-attention is consistently worst at this
+scale. CarRacing's action is three numbers, which puts this stage in the
+regime where the cheapest option should be enough. Exercise P5 makes you
+commit to a prediction before you check.
+
+One implementation detail worth internalizing, because the stage 4 test
+suite encodes it: FiLM's modulation head is zero-initialized, the DiT
+convention that makes a block start as an identity map so it cannot
+destabilize early training. Since FiLM is the action's only path into the
+network here, that means the action embedding gets exactly zero gradient on
+step 0. The head itself does get gradient, so the path opens on step 1. A
+conditioning mechanism that is provably inert at initialization is not
+broken, but you should be able to say why.
+
 ## Why few sampling steps matter, and what comes next
 
 Each ladder step is a full forward pass, per frame. A world model you can
@@ -127,6 +205,19 @@ unit variance before dynamics training, because the flow interpolates
 against unit Gaussian noise; if data variance is much smaller than 1, tau
 stops meaning "fraction of signal". open-dreamer does the same with dataset
 stats.
+
+Where tau is sampled from. The default draws tau uniformly on [0, 1], so
+every noise level is trained equally often. That is the honest default and
+the easiest to reason about, but it is not obviously the best allocation of
+a training budget. Near tau = 0 the input is nearly pure noise and the
+best possible answer is roughly the dataset mean; near tau = 1 the input
+nearly is the answer. Both ends are cheap to fit, and uniform sampling
+spends a lot of gradient there. The SD3 recipe, which nano-world-model
+adopts as its default, instead draws u ~ N(0, 1) and uses sigmoid(u),
+concentrating samples near tau = 0.5 where the model actually has to decide
+what the frame contains. `--tau-sampling logit_normal` switches this stage
+over; break-it lab D asks you to find out whether it helps here, and the
+answer on an environment this easy is not a foregone conclusion.
 
 Token layout. Per frame: one action token, one tau token, 64 latent tokens.
 The tau token, built from a sinusoidal embedding of tau, is how the model
@@ -206,3 +297,20 @@ dream, which is the open-dreamer program in full.
    architectural property makes that valid?
 8. Why does real-time use care about K, and what would shortcut
    distillation buy you?
+9. Which property of training makes the scheduling matrix legal at all,
+   and what would go wrong if you handed a stage 3 model an arbitrary
+   assignment of noise levels across its context?
+10. Write down the pyramid schedule for K = 2, three frames, stagger 1.
+    Which two settings of stagger recover full_sequence and sequential,
+    and why does that make "diffusion forcing unifies teacher forcing and
+    full-sequence diffusion" a statement about one formula rather than a
+    slogan?
+11. full_sequence generates a four-frame block in 4 model calls where
+    sequential needs 16. Name the thing you gave up, and the regime where
+    giving it up is a bad trade.
+12. Uniform tau sampling spends equal budget on tau near 0 and tau near
+    0.5. Why might that be a poor allocation, and what does sigmoid of a
+    standard normal do about it?
+13. FiLM conditioning is zero-initialized, so the action embedding
+    receives zero gradient on the first step. Why is that not a bug, and
+    why is the same argument weaker here than it is in DiT?

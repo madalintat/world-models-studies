@@ -12,6 +12,12 @@ keeps them honest.
 - `guide_open_dreamer.md`: a guided reading tour of `../open-dreamer`,
   mapping every major file and class to the course stage that taught it.
   Every file and symbol reference is machine-verified.
+- `guide_nano_world_model.md`: a shorter tour of the Simchowitz lab's
+  nano-world-model, the closest published sibling to your stage 4. Read it
+  for its ablation tables, which are answer keys to stage 4's prediction
+  exercises, and for the two ideas the course does not have: semantic
+  latent codecs with no decoder, and CEM planning on top of a world model.
+  References are to the public repo and are not machine-checked.
 - `research.md`: three experiment specs sized for an 8-GPU workstation
   (drift benchmark, memory probe, dream-cheating study), with metrics,
   GPU-hour budgets, and what results would mean.

@@ -1,26 +1,37 @@
 import numpy as np
+import pytest
 import torch
 
 from stage4_diffusion_forcing.flow import (
+    euler_beta,
     euler_mix,
     flow_matching_loss,
     interpolate,
     loss_weight,
     make_ladder,
     sample_frame_taus,
+    scheduling_matrix,
 )
 from stage4_diffusion_forcing.s4_latent_ae import LatentAE
 from stage4_diffusion_forcing.s4_model import DynamicsTransformer
-from stage4_diffusion_forcing.sampling4 import drift_curve, rollout
+from stage4_diffusion_forcing.sampling4 import drift_curve, rollout, rollout_block
 
 torch.manual_seed(0)
 
 
-def tiny_model(max_t=8):
+def tiny_model(max_t=8, injection="token"):
     torch.manual_seed(1)
     return DynamicsTransformer(
-        latent_dim=4, n_latent_tokens=16, d_model=32, n_heads=2, depth=4, max_t=max_t
+        latent_dim=4, n_latent_tokens=16, d_model=32, n_heads=2, depth=4,
+        max_t=max_t, injection=injection,
     )
+
+
+def pyramid_or_skip(k_steps, n_frames, stagger=1):
+    try:
+        return scheduling_matrix("pyramid", k_steps, n_frames, stagger)
+    except NotImplementedError:
+        pytest.skip("_pyramid_schedule is yours to write: see exercises.md")
 
 
 def test_interpolation_endpoints():
@@ -43,6 +54,168 @@ def test_per_frame_tau_independence():
     # frames within a sequence are not tied together
     corr = np.corrcoef(tau[:, 0].numpy(), tau[:, 1].numpy())[0, 1]
     assert abs(corr) < 0.1
+
+
+def test_logit_normal_tau_concentrates_on_mid_noise():
+    g = torch.Generator().manual_seed(0)
+    uni = sample_frame_taus(4096, 8, generator=g)
+    ln = sample_frame_taus(4096, 8, scheme="logit_normal", generator=g)
+    assert ln.shape == (4096, 8)
+    assert ln.min() > 0.0 and ln.max() < 1.0
+    # sigmoid of a symmetric normal is symmetric about 0.5 ...
+    assert abs(ln.mean().item() - 0.5) < 0.02
+    # ... but tighter than uniform, which is the whole point: fewer samples
+    # wasted on the trivially easy ends of the noise range.
+    assert ln.std().item() < uni.std().item()
+    with pytest.raises(ValueError):
+        sample_frame_taus(2, 2, scheme="nope")
+
+
+def test_scheduling_matrix_corners():
+    k, n = 3, 4
+
+    full = scheduling_matrix("full_sequence", k, n)
+    assert full.shape == (k + 1, n)
+    # every frame moves together, so all columns are identical
+    assert (full == full[:, :1]).all()
+
+    seq = scheduling_matrix("sequential", k, n)
+    assert seq.shape == (k * n + 1, n)
+    # frame f is still pure noise until frame f-1 is finished
+    for f in range(1, n):
+        assert seq[k * f, f] == 0
+        assert seq[k * f, f - 1] == k
+
+    for m in (full, seq):
+        assert (m[0] == 0).all(), "row 0 is pure noise"
+        assert (m[-1] == k).all(), "last row is clean"
+        assert (m.diff(dim=0) >= 0).all(), "noise level never goes backwards"
+
+    with pytest.raises(ValueError):
+        scheduling_matrix("nope", k, n)
+
+
+def test_pyramid_schedule_contract():
+    k, n = 2, 3
+    m = pyramid_or_skip(k, n)
+    assert m.shape == (k + n, n)
+    assert (m[0] == 0).all()
+    assert (m[-1] == k).all()
+    assert (m.diff(dim=0) >= 0).all()
+    expected = torch.tensor([[0, 0, 0], [1, 0, 0], [2, 1, 0], [2, 2, 1], [2, 2, 2]])
+    assert torch.equal(m, expected)
+
+
+def test_pyramid_stagger_interpolates_between_the_corners():
+    """stagger 0 collapses to full sequence, stagger k to sequential."""
+    k, n = 3, 4
+    assert torch.equal(pyramid_or_skip(k, n, 0)[: k + 1],
+                       scheduling_matrix("full_sequence", k, n))
+    assert torch.equal(pyramid_or_skip(k, n, k), scheduling_matrix("sequential", k, n))
+
+
+def test_euler_beta_matches_the_ladder():
+    taus, betas = make_ladder(4)
+    assert torch.allclose(euler_beta(taus[:-1], taus[1:]), betas)
+    # a frame that does not move on this row must be left untouched
+    tau = torch.tensor([0.5])
+    assert torch.allclose(euler_beta(tau, tau), torch.ones(1))
+    z, x_hat = torch.randn(1, 1, 4, 2), torch.randn(1, 1, 4, 2)
+    assert torch.allclose(euler_mix(z, x_hat, euler_beta(tau, tau)), z)
+
+
+def test_block_rollout_shapes_and_call_counts():
+    model = tiny_model(max_t=8)
+    prefill = torch.randn(1, 4, 16, 4)
+    actions = torch.randn(1, 8, 3)
+    for mode in ("full_sequence", "sequential"):
+        out = rollout_block(
+            model, prefill, actions, horizon=4, k_steps=2, mode=mode,
+            generator=torch.Generator().manual_seed(0),
+        )
+        assert out.shape == (1, 4, 16, 4)
+        assert torch.isfinite(out).all()
+    # a block longer than the model's window is a bug, not a silent truncation
+    with pytest.raises(AssertionError):
+        rollout_block(model, prefill, actions, horizon=8, k_steps=2)
+
+
+def test_pyramid_is_cheaper_than_sequential_for_the_same_block():
+    """The reason to care: rows are model calls."""
+    k, n = 4, 8
+    pyramid_rows = pyramid_or_skip(k, n).shape[0]
+    assert pyramid_rows < scheduling_matrix("sequential", k, n).shape[0]
+    model = tiny_model(max_t=12)
+    out = rollout_block(
+        model, torch.randn(1, 4, 16, 4), torch.randn(1, 12, 3), horizon=8,
+        k_steps=k, mode="pyramid",
+        generator=torch.Generator().manual_seed(0),
+    )
+    assert out.shape == (1, 8, 16, 4)
+    assert torch.isfinite(out).all()
+
+
+@pytest.mark.parametrize("injection", ["token", "additive", "film"])
+def test_action_injection_variants_learn_from_the_action(injection):
+    """A world model that cannot learn from its action is not a world model.
+
+    This checks the gradient rather than the output, in the same spirit as
+    stage 0's test that gradient reaches fc_logvar through the reparam
+    trick. FiLM needs two steps to get there and that is worth knowing:
+    its modulation head is zero-initialized (the DiT convention, so the
+    block starts as an identity map and cannot destabilize early training),
+    and since FiLM is the action's *only* path into the network, a zero
+    modulation weight means the action embedding receives exactly zero
+    gradient on step 0. The head itself does get gradient, so the path
+    opens on step 1. With "token" or "additive" the action reaches the
+    latents directly and there is no such delay.
+    """
+    model = tiny_model(injection=injection)
+    z = torch.randn(2, 6, 16, 4)
+    a = torch.randn(2, 6, 3)
+    tau = torch.rand(2, 6)
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    out = model(z, a, tau)
+    assert out.shape == (2, 6, 16, 4)
+    assert torch.isfinite(out).all()
+    out.pow(2).mean().backward()
+
+    if injection == "film":
+        heads = [b.film.weight.grad for b in model.blocks]
+        assert all(g is not None and g.abs().sum() > 0 for g in heads)
+        assert model.action_in.weight.grad.abs().sum() == 0, "see the docstring"
+        opt.step()
+        opt.zero_grad()
+        model(z, a, tau).pow(2).mean().backward()
+
+    assert model.action_in.weight.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize("injection", ["token", "additive"])
+def test_non_zero_init_injections_change_the_output_immediately(injection):
+    model = tiny_model(injection=injection).eval()
+    z, tau = torch.randn(2, 6, 16, 4), torch.rand(2, 6)
+    with torch.no_grad():
+        out = model(z, torch.randn(2, 6, 3), tau)
+        other = model(z, torch.randn(2, 6, 3) + 5.0, tau)
+    assert not torch.allclose(out, other, atol=1e-4)
+
+
+def test_token_injection_costs_a_sequence_slot():
+    """The trade-off the ablation is about, made concrete."""
+    tok, add = tiny_model(injection="token"), tiny_model(injection="additive")
+    assert tok.n_prefix == 2 and add.n_prefix == 1
+    assert tok.space_pos.shape[2] == add.space_pos.shape[2] + 1
+    # additive reuses the action embedding it already had, so it is free
+    assert sum(p.numel() for p in add.parameters()) < sum(
+        p.numel() for p in tok.parameters()
+    )
+    # film pays for a modulation head in every block
+    film = tiny_model(injection="film")
+    assert sum(p.numel() for p in film.parameters()) > sum(
+        p.numel() for p in add.parameters()
+    )
 
 
 def test_loss_weight_schemes():

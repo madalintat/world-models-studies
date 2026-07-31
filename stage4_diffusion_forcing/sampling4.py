@@ -5,7 +5,60 @@ with stage 3."""
 import numpy as np
 import torch
 
-from stage4_diffusion_forcing.flow import euler_mix, make_ladder, noise_context
+from stage4_diffusion_forcing.flow import (
+    euler_beta,
+    euler_mix,
+    make_ladder,
+    noise_context,
+    scheduling_matrix,
+)
+
+
+@torch.no_grad()
+def rollout_block(
+    model,
+    prefill: torch.Tensor,
+    actions: torch.Tensor,
+    horizon: int,
+    k_steps: int = 4,
+    mode: str = "pyramid",
+    stagger: int = 1,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Generate `horizon` frames as one block under a scheduling matrix.
+
+    Where `rollout` finishes each frame before starting the next, this
+    denoises the whole block at once and lets the schedule decide how far
+    ahead of frame f+1 frame f is allowed to get. The prefill stays clean
+    at tau = 1 throughout, so no context re-noising is needed: unlike the
+    autoregressive path, no frame here is ever conditioned on a finished
+    generation of its own, only on partly-denoised neighbours.
+
+    prefill: (B, T0, S, D) clean normalized latents.
+    actions: (B, T0 + horizon, A). Requires T0 + horizon <= model.max_t.
+    Returns the generated latents, (B, horizon, S, D).
+    """
+    model.eval()
+    b, t0, s, d = prefill.shape
+    total = t0 + horizon
+    assert total <= model.max_t, (
+        f"block rollout needs T0 + horizon ({total}) <= model.max_t "
+        f"({model.max_t}); use rollout() for longer spans"
+    )
+    device = prefill.device
+    taus, _ = make_ladder(k_steps, device=device)
+    matrix = scheduling_matrix(mode, k_steps, horizon, stagger).to(device)
+
+    z = torch.randn((b, horizon, s, d), generator=generator, device=device)
+    ctx_tau = torch.ones(t0, device=device)
+    for row in range(matrix.shape[0] - 1):
+        curr, nxt = taus[matrix[row]], taus[matrix[row + 1]]
+        tau_vec = torch.cat([ctx_tau, curr]).expand(b, -1)
+        seq = torch.cat([prefill, z], dim=1)
+        x_hat = model(seq, actions[:, :total], tau_vec)[:, t0:]
+        beta = euler_beta(curr, nxt).view(1, horizon, 1, 1)
+        z = euler_mix(z, x_hat, beta)
+    return z
 
 
 @torch.no_grad()

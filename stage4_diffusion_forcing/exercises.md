@@ -91,6 +91,51 @@ sits 7+ dB lower from the very first generated frame, because errors it was
 never trained to see compound immediately, while the diffusion-forced model
 degrades gently.
 
+### 5. Action injection: does the mechanism matter here?
+
+The action reaches the dynamics model as an extra token in each frame's space
+sequence. That is a choice, not a law. `--injection additive` adds the action
+embedding to every latent token instead, costing no sequence slot and no
+parameters; `--injection film` gives every block a per-frame scale and shift
+predicted from the action.
+
+nano-world-model ran this ablation properly, at scale, with five mechanisms.
+Before looking anything up, commit to two answers. First: for CarRacing's
+3-number action, will the three mechanisms land within about 1 dB of each
+other, or will one clearly win? Second: which one would you bet on, and is
+your reason about capacity or about optimization?
+
+    uv run python -m stage4_diffusion_forcing.train --smoke --injection token \
+        --out data/stage4_diffusion_forcing/out_inj_token
+    uv run python -m stage4_diffusion_forcing.train --smoke --injection additive \
+        --out data/stage4_diffusion_forcing/out_inj_additive
+    uv run python -m stage4_diffusion_forcing.train --smoke --injection film \
+        --out data/stage4_diffusion_forcing/out_inj_film
+
+Expected: they cluster. Measured reference, same seed:
+
+| Injection | Params | Last-frame PSNR |
+|:--|--:|--:|
+| `token` | 214472 | 23.18 dB |
+| `additive` | 214408 | 22.80 dB |
+| `film` | 247688 | 22.09 dB |
+
+A 1.1 dB spread across the three, on a single seed, at smoke scale, is not a
+ranking. Resist reading one. The parameter column is the part that is real:
+additive is 64 parameters cheaper than token and costs no sequence slot,
+while film pays 33k parameters for a modulation head in every block.
+
+This matches the published result rather than contradicting it, which is the
+point of the exercise. nano-world-model's PushT sweep (2D actions) put all
+five mechanisms within 0.32 PSNR, with plain additive winning at zero extra
+cost; only on 7D robot actions did FiLM pull ahead, and cross-attention was
+consistently worst everywhere. The lesson to take is about when an
+architectural knob is worth spending on: a 3-number action carries so little
+information that any path into the network suffices, and the interesting
+question was never "which is best" but "how much does this axis matter at
+all". Be suspicious of papers that ablate a knob without telling you the
+regime in which the knob is dead.
+
 ## Break-it labs
 
 ### Lab A: clean context (the money experiment)
@@ -169,6 +214,87 @@ rerun the trainer. Commit to a prediction first. Measured honestly: at smoke
 scale this also moves PSNR by well under 1 dB. If you predicted a collapse,
 notice what that teaches you about trusting a mechanism story without measuring
 it.
+
+### Lab D: build the pyramid schedule, then price the corners
+
+This one is a build, not a sabotage, and it is the piece of this stage worth
+writing yourself. `flow.py` ships `_full_sequence_schedule` and
+`_sequential_schedule` but raises `NotImplementedError` for
+`_pyramid_schedule`. The docstring there gives you the exact contract, a
+worked example for K = 2 with three frames, and the reason `stagger` is a
+knob rather than a constant. It is about six lines. Three tests in
+`tests/test_stage4_diffusion_forcing.py` currently skip and will start
+running the moment you write it, including one that checks stagger 0 recovers
+`full_sequence` and stagger K recovers `sequential`.
+
+Before writing it, commit to an answer: over a four-frame block, how many
+model calls does each mode need at K = 4? Then check yourself:
+
+    uv run python -m stage4_diffusion_forcing.train --smoke \
+        --schedule full_sequence \
+        --out data/stage4_diffusion_forcing/out_sched_full
+    uv run python -m stage4_diffusion_forcing.train --smoke \
+        --schedule pyramid \
+        --out data/stage4_diffusion_forcing/out_sched_pyramid
+    uv run python -m stage4_diffusion_forcing.train --smoke \
+        --out data/stage4_diffusion_forcing/out_sched_seq
+
+Each run prints its model-call count. Measured reference, same four-frame
+block, same seed:
+
+| Mode | Model calls | Last-frame PSNR |
+|:--|--:|--:|
+| `full_sequence` | 4 | 27.27 dB |
+| `pyramid` (stagger 1) | 7 | 28.15 dB |
+| `sequential` | 16 | not run here |
+
+The `sequential` row is arithmetic, not a measurement: K * n_frames = 16, and
+the default 12-frame autoregressive rollout costs 48, which is why the block
+modes print a note about capping the horizon to the attention window.
+
+Observe the shape of the trade rather than the winner. Pyramid buys about 0.9
+dB on the last frame for 3 extra model calls, so the dial is real and it
+points the way you would expect: more calls, better conditioning, better
+frames. But notice how flat it is. Quadrupling the calls from 4 to 16 cannot
+plausibly buy four times the 0.9 dB, because on four frames from a clean
+ground-truth prefill there is very little for the conditioning to disagree
+about in the first place. The regime where the expensive corner earns its
+money is long blocks where a frame genuinely needs its predecessor resolved
+before it can commit, which is exactly what the sliding-window rollout and its
+re-noised context exist to handle.
+
+Teaches: diffusion forcing's training-time trick (independent per-frame tau)
+buys an inference-time freedom, and that freedom is a cost/coherence dial you
+choose per deployment rather than a property of the trained model.
+
+### Lab E: logit-normal tau sampling
+
+Sabotage is the wrong word again: this is the SD3 default that
+nano-world-model uses, and the question is whether it earns its keep here.
+Uniform tau spends equal training budget on every noise level. Logit-normal
+draws u ~ N(0, 1) and uses sigmoid(u), concentrating on tau near 0.5.
+
+Commit first: does concentrating the budget on mid-noise levels help the drift
+curve, hurt it, or do nothing measurable on CarRacing?
+
+    uv run python -m stage4_diffusion_forcing.train --smoke \
+        --tau-sampling logit_normal \
+        --out data/stage4_diffusion_forcing/out_tau_logitnormal
+    uv run python -m stage4_diffusion_forcing.train --smoke \
+        --out data/stage4_diffusion_forcing/out_tau_uniform
+
+Expected at smoke scale: nothing you can distinguish from run-to-run noise (a
+reference pair gave 22.45 dB for logit-normal against 23.18 dB for uniform on
+the last frame, so logit-normal is slightly behind on one seed, which is to
+say nothing at all). Do not read that as "SD3 is wrong". Read the shape of the
+argument: the recipe exists because at scale, on hard data, the ends of the
+tau range are wasted budget. At K = 4 on a 260-frame CarRacing smoke set,
+there is no budget pressure to relieve. A technique can be correct and still
+be unmeasurable in your regime, and knowing which regime you are in is worth
+more than knowing the technique.
+
+Teaches: how to read a defaults table from someone else's repo. Their default
+is evidence about their regime, not a universal ranking.
 
 Teaches: the tau token is what makes the denoising objective well posed, and
 the loss curve proves the model uses it. Whether a conditioning defect shows up
