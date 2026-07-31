@@ -16,8 +16,14 @@ the stages are the decompressor.
 
 - Hafner et al., "Learning Latent Dynamics for Planning from Pixels"
   (PlaNet, 2019). Introduces the RSSM you built in stage 2; read it for
-  the deterministic-plus-stochastic state argument, and skip the planning
-  half (CEM) that history discarded.
+  the deterministic-plus-stochastic state argument, and do not skip the
+  planning half. Dreamer replaced CEM with a learned actor and the field
+  followed, but planning on top of a learned model came back: Simchowitz
+  lab's nano-world-model (2026) ships CEM model-predictive control over a
+  diffusion world model as one of three headline applications, and it
+  trains no policy at all. Sampling action sequences and scoring them with
+  the model is the cheapest way to turn any of your stages 1 through 4
+  into a controller.
 - Hafner et al., "Dream to Control" (DreamerV1, 2020). Replaces PlaNet's
   planner with an actor-critic trained by backprop through imagined
   latent trajectories, which is the single move that made world models a

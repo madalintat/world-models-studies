@@ -17,29 +17,33 @@ compiles a C++ extension and swig is its one awkward build dependency.
 
 ## A CUDA GPU machine
 
-Same repo, swap torch for the CUDA build in a separate venv so the CPU
-lockfile stays untouched:
+Same repo, swap torch for the CUDA build in a separate venv so the CPU lockfile
+stays untouched:
 
 ```bash
 uv venv .venv-gpu --python 3.12
-UV_PROJECT_ENVIRONMENT=.venv-gpu uv pip install torch --index-url https://download.pytorch.org/whl/cu128
-UV_PROJECT_ENVIRONMENT=.venv-gpu uv pip install numpy einops imageio tqdm pytest "gymnasium[box2d]"
-UV_PROJECT_ENVIRONMENT=.venv-gpu uv run python -c "import torch; print(torch.cuda.get_device_name(0))"
+export UV_PROJECT_ENVIRONMENT=.venv-gpu   # every command below targets it
+
+uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+uv pip install numpy einops imageio tqdm pytest "gymnasium[box2d]"
+
+uv run python -c "import torch; print(torch.cuda.get_device_name(0))"
 ```
 
-No install of the repo itself is needed: every stage runs as
-`python -m stageN_xxx.some_module` from the repo root, which puts the repo
-on the path.
+No install of the repo itself is needed: every stage runs as `python -m
+stageN_xxx.some_module` from the repo root, which puts the repo on the path.
 
-RTX 5090 is Blackwell (sm_120), which needs a recent torch cu128+ wheel. If
-the box already has a system CUDA setup that fights you, a plain
-`python -m venv` with the same installs works just as well.
+RTX 5090 is Blackwell (sm_120), which needs a recent torch cu128+ wheel. If the
+box already has a system CUDA setup that fights you, a plain `python -m venv`
+with the same installs works just as well.
 
-On a shared multi-GPU machine, pin one visible card so you only use what
-you need:
+On a shared multi-GPU machine, pin one visible card so you only use what you
+need:
 
 ```bash
-CUDA_VISIBLE_DEVICES=3 UV_PROJECT_ENVIRONMENT=.venv-gpu uv run python -m stage0_compression.train --model vae --device cuda
+export UV_PROJECT_ENVIRONMENT=.venv-gpu
+CUDA_VISIBLE_DEVICES=3 uv run python -m stage0_compression.train \
+    --model vae --device cuda
 ```
 
 Every training stage takes `--device cuda` for its full run; each stage
@@ -47,19 +51,19 @@ README's "Full run" section has the exact commands.
 
 ## Modal
 
-The stages do not ship Modal launcher scripts; each stage README carries a
-cost estimate instead. To burst a full run to Modal, wrap the stage's train
-module in a small app of your own:
+The stages do not ship Modal launcher scripts; each stage README carries a cost
+estimate instead. To burst a full run to Modal, wrap the stage's train module
+in a small app of your own:
 
 ```bash
 uv tool install modal
 modal setup                      # once, links your account
-modal run my_modal_run.py        # a function that calls e.g. stage4_diffusion_forcing.train
+modal run my_modal_run.py        # your app, calling e.g. stage4's train
 ```
 
 Cost notes live in each stage's docs. Rule of thumb: an A100-40GB is around
-$2-3 per hour, so check the stage's estimated hours before launching, and
-use checkpoint/resume so an interrupted run does not burn credits twice.
+$2-3 per hour, so check the stage's estimated hours before launching, and use
+checkpoint/resume so an interrupted run does not burn credits twice.
 
 ## Data
 
